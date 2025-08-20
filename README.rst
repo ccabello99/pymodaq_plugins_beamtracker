@@ -10,10 +10,10 @@ pymodaq_plugins_beamtracker
    :alt: Documentation Status
 
 .. image:: https://github.com/ccabello99/pymodaq_plugins_beamtracker/workflows/Upload%20Python%20Package/badge.svg
-    :target: https://github.com/PyMoDAQ/pymodaq_plugins_beamtracker
+    :target: https://github.com/ccabello99/pymodaq_plugins_beamtracker
 
-.. image:: https://github.com/PyMoDAQ/pymodaq_plugins_beamtracker/actions/workflows/Test.yml/badge.svg
-    :target: https://github.com/PyMoDAQ/pymodaq_plugins_beamtracker/actions/workflows/Test.yml
+.. image:: https://github.com/ccabello99/pymodaq_plugins_beamtracker/actions/workflows/Test.yml/badge.svg
+    :target: https://github.com/ccabello99/pymodaq_plugins_beamtracker/actions/workflows/Test.yml
 
 
 This plugin provides a new application that can be launched from the terminal using::
@@ -37,6 +37,9 @@ You can start the appropriate version either by running the class directly or by
 
    beam_tracker --mode 1   # single camera (default)
    beam_tracker --mode 2   # dual camera
+
+If you are running dual-camera mode, it is suggested to keep exposure time above 100 ms for both cameras, or adjust the 
+Wait time parameter in the Main settings parameter tree of the cameras. This will keep app performance smooth.
 
 
 Authors
