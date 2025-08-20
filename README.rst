@@ -16,14 +16,27 @@ pymodaq_plugins_beamtracker
     :target: https://github.com/PyMoDAQ/pymodaq_plugins_beamtracker/actions/workflows/Test.yml
 
 
-Plugin exposing a new app which can be run with `beam_tracker` in the terminal: the BeamTracker performs 2D Gaussian fitting
-and tracking to displayed data. Drawing the fit and displaying its lineouts is an option in the parameter tree. Once a fit is
-displayed in the viewer, one can choose to save it via the parameter tree, which saves it to the ROIManager. It can then be
-loaded from the parameter tree as well after specifying the .xml file. The loading of saved roi files is an option in the 
-parameter tree because performing the loading here will prevent the display of the lineout viewers and the ROIManager.
+This plugin provides a new application that can be launched from the terminal using::
 
-There is a BeamTracker class for 1 camera usage and a BeamTracker class for 2 camera usage. You can either run the main
-function of either class to start them up, or call `beam_tracker --mode (1 or 2)`.
+   beam_tracker
+
+The **BeamTracker** performs 2D Gaussian fitting and tracking on displayed camera data.  
+Features include:
+
+- Optional drawing of the fit ellipse and display of its horizontal/vertical lineouts (via the parameter tree).
+- Saving the current fit to the **ROI Manager** directly from the parameter tree.
+- Loading saved ROIs from an ``.xml`` file (also via the parameter tree).  
+  Note: loading ROIs through the parameter tree bypasses the lineout viewers and ROI Manager to avoid conflicts.
+
+Two variants of the BeamTracker are available:
+
+- **Single-camera mode**
+- **Dual-camera mode**
+
+You can start the appropriate version either by running the class directly or by calling::
+
+   beam_tracker --mode 1   # single camera (default)
+   beam_tracker --mode 2   # dual camera
 
 
 Authors
