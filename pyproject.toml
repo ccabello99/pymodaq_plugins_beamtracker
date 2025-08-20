@@ -1,6 +1,6 @@
 [features]  # defines the plugin features contained into this plugin
 instruments = true  # true if plugin contains instrument classes (else false, notice the lowercase for toml files)
-extensions = true  # true if plugins contains dashboard extensions
+extensions = false  # true if plugins contains dashboard extensions
 models = true  # true if plugins contains models
 h5exporters = false  # true if plugin contains custom h5 file exporters
 scanners = false  # true if plugin contains custom scan layout (daq_scan extensions)
@@ -10,20 +10,19 @@ requires = ["hatchling>=1.9.0", "hatch-vcs", "toml", "pymodaq_utils"]
 build-backend = "hatchling.build"
 
 [urls]
-package-url = 'https://github.com/PyMoDAQ/pymodaq_plugins_datamixer'
+package-url = 'https://github.com/ccabello99/pymodaq_plugins_beamtracker'
 
 [project]
 dynamic = ["version", "urls", "entry-points"]
 readme = "README.rst"
 license = { file="LICENSE" }
 requires-python = ">=3.8"
-description = 'Implements an extension to manipulate data from several DAQ_Viewers'
-name = "pymodaq_plugins_datamixer"
+description = 'Implements an app to use two cameras for beam tracking, e.g. near-field and far-field.'
+name = "pymodaq_plugins_beamtracker"
 authors = [
-    {name='Sebastien J. Weber', email='sebastien.weber@cnrs.fr'}
+    {name='Christian Cabello', email='christian.cabello@ip-paris.fr'}
 ]
 dependencies = [
-    "pymodaq>=5.1.0.alpha"
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -41,6 +40,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Software Development :: User Interfaces",
 ]
+
+[project.scripts]
+beam_tracker = "pymodaq_plugins_beamtracker.app.beam_tracker:main"
 
 [tool.hatch.metadata.hooks.custom]
 

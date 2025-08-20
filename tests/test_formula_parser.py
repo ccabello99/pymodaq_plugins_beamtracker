@@ -2,7 +2,7 @@ import pytest
 import re
 import numpy as np
 
-from pymodaq_plugins_datamixer.extensions.utils.parser import (
+from pymodaq_plugins_beamtracker.extensions.utils.parser import (
     split_formulae, extract_data_names, replace_names_in_formula)
 from pymodaq_data.data import DataToExport, DataRaw
 

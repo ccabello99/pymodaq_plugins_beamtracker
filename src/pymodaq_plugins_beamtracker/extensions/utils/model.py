@@ -18,16 +18,16 @@ from pymodaq_gui.managers.parameter_manager import ParameterManager, Parameter
 logger = set_logger(get_module_name(__file__))
 
 if TYPE_CHECKING:
-    from pymodaq_plugins_datamixer.extensions.data_mixer import DataMixer
+    from pymodaq_plugins_beamtracker.extensions.beam_tracker import BeamTracker
     from pymodaq.utils.managers.modules_manager import ModulesManager
 
 
-class DataMixerModel:
+class BeamTrackerModel:
 
     detectors_name: List[str] = []
     params = []
 
-    def __init__(self, data_mixer: 'DataMixer'):
+    def __init__(self, data_mixer: 'BeamTracker'):
         self.data_mixer = data_mixer
         self.modules_manager: ModulesManager = data_mixer.dashboard.modules_manager
         self.settings: Parameter = self.data_mixer.settings.child('models', 'model_params')

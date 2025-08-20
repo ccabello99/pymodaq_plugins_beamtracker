@@ -9,7 +9,7 @@ from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, como
 from pymodaq.utils.data import DataFromPlugins
 
 if TYPE_CHECKING:
-    from pymodaq_plugins_datamixer.extensions.data_mixer import DataMixer
+    from pymodaq_plugins_beamtracker.extensions.beam_tracker import DataMixer
 
 
 class DAQ_0DViewer_DataMixer(DAQ_Viewer_base):
