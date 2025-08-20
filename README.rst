@@ -61,8 +61,10 @@ Viewer0D
 Application
 ==========
 
-* BeamTracker: application which can be run via terminal as `beam_tracker`: The BeamTracker performs 2D Gaussian fitting
-and tracking to displayed data, allowing the option to draw the fit in the viewer and display its lineouts.
+* BeamTracker: Performs 2D Gaussian fitting and tracking on displayed camera data. 
+   provides a new application that can be launched from the terminal using::
+
+   beam_tracker
 
 
 Installation instructions
