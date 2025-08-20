@@ -22,8 +22,7 @@ name = "pymodaq_plugins_beamtracker"
 authors = [
     {name='Christian Cabello', email='christian.cabello@ip-paris.fr'}
 ]
-dependencies = [
-]
+dependencies = ['laserbeamsize']
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Other Environment",
