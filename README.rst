@@ -22,7 +22,8 @@ displayed in the viewer, one can choose to save it via the parameter tree, which
 loaded from the parameter tree as well after specifying the .xml file. The loading of saved roi files is an option in the 
 parameter tree because performing the loading here will prevent the display of the lineout viewers and the ROIManager.
 
-There is a BeamTracker class for 1 camera usage and a BeamTracker class for 2 camera usage.
+There is a BeamTracker class for 1 camera usage and a BeamTracker class for 2 camera usage. You can either run the main
+function of either class to start them up, or call `beam_tracker --mode (1 or 2)`.
 
 
 Authors
