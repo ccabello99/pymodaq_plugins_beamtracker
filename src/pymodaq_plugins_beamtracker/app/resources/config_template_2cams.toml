@@ -1,0 +1,29 @@
+title = 'this is the configuration file of the plugin BeamTracker'
+
+preset = 'preset_config'
+
+[camera_viewers.first]
+do_init = true
+detector = 'ImagingSource'
+camera_name = 'DMK 42BUC03'
+
+[camera_viewers.second]
+do_init = true
+detector = 'Basler'
+camera_name = 'Basler puA1600-60um (25171432)'
+
+[camera1_properties.exposure]
+ExposureAuto = false
+ExposureTime = 30
+
+[camera1_properties.gain]
+GainAuto = false
+Gain = 15
+
+[camera2_properties.exposure]
+ExposureAuto = false
+ExposureTime = 20
+
+[camera2_properties.gain]
+GainAuto = false
+Gain = 15

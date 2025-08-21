@@ -2,7 +2,8 @@ from qtpy import QtWidgets, QtCore, QtGui
 import numpy as np
 import os
 import xml.etree.ElementTree as ET
-from functools import partial
+import tomllib
+from pathlib import Path
 
 from pymodaq.utils import gui_utils as gutils
 from pymodaq.utils.config import Config
@@ -63,7 +64,9 @@ class BeamTracker2(gutils.CustomApp):
         self.units = 'um'
 
         self.viewers = {}  # will store all per-viewer info
+        self.config = {}
 
+        self.setup_config()
         self.setup_ui()
         self._setup_worker_threads()
         self.show_viewers(True)
@@ -104,20 +107,26 @@ class BeamTracker2(gutils.CustomApp):
         self.settings2.child('viewer_idx').setValue(1)
         self.docks['settings_2'] = gutils.Dock('Settings')
         self.dockarea.addDock(self.docks['settings_2'], 'below', self.docks['lcds_2'])
-        self.docks['settings_2'].addWidget(self.settings_tree2)             
+        self.docks['settings_2'].addWidget(self.settings_tree2)
 
         cam_window = QtWidgets.QMainWindow() 
         dockarea = gutils.DockArea()
         cam_window.setCentralWidget(dockarea) 
         self.camera_viewer = DAQ_Viewer(dockarea, title='Beam Tracker 1', daq_type='DAQ2D') 
-        self.camera_viewer.init_hardware(do_init=False) 
+        self.camera_viewer.detector = self.config['camera_viewers']['first']['detector']
+        self.camera_viewer.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_viewers']['first']['camera_name'])
+        self.camera_viewer.init_signal.connect(lambda _: self._on_viewer_initialized(viewer_idx=0))
+        self.camera_viewer.init_hardware(do_init=self.config['camera_viewers']['first']['do_init'])
         QtWidgets.QApplication.processEvents()
 
         cam_window = QtWidgets.QMainWindow() 
         dockarea = gutils.DockArea()
         cam_window.setCentralWidget(dockarea) 
         self.camera_viewer2 = DAQ_Viewer(dockarea, title='Beam Tracker 2', daq_type='DAQ2D') 
-        self.camera_viewer2.init_hardware(do_init=False) 
+        self.camera_viewer2.detector = self.config['camera_viewers']['second']['detector']
+        self.camera_viewer2.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_viewers']['second']['camera_name'])
+        self.camera_viewer2.init_signal.connect(lambda _: self._on_viewer_initialized(viewer_idx=1))
+        self.camera_viewer2.init_hardware(do_init=self.config['camera_viewers']['second']['do_init'])
         QtWidgets.QApplication.processEvents()
 
         self.fit_roi = EllipseROI(index=0, pos=[0,0], size=[10,10]) 
@@ -169,6 +178,23 @@ class BeamTracker2(gutils.CustomApp):
             ]
         )
 
+    def set_camera_presets(self, viewer_idx):
+        viewer_info = self.viewers[viewer_idx]
+        camera_viewer = viewer_info['camera_viewer']
+        cam_props = self.config.get("camera1_properties", {}) if viewer_idx == 0 else self.config.get("camera2_properties", {})
+        for key, val in cam_props.items():
+            if isinstance(val, dict):
+                for prop, value in val.items():
+                    param = camera_viewer.settings.child('detector_settings', str(key), str(prop))
+                    if param is not None:
+                        param.setValue(value)
+                        param.sigValueChanged.emit(param, param.value())        
+
+    def setup_config(self):
+        config_template_path = Path(__file__).parent.joinpath('resources/config_template_2cams.toml')        
+        with open(config_template_path, "rb") as f:
+            self.config = tomllib.load(f)
+
     def _setup_worker_threads(self):
         self.viewers = []
         for idx in range(2):
@@ -187,6 +213,7 @@ class BeamTracker2(gutils.CustomApp):
             w.error.connect(lambda err_msg, fid, _idx=idx: self._on_worker_error(err_msg, fid, viewer_idx=_idx))
 
             self.viewers.append({
+                'camera_viewer': self.camera_viewer if idx == 0 else self.camera_viewer2,
                 'viewer': self.target_viewer if idx == 0 else self.target_viewer2,
                 'roi': self.fit_roi if idx == 0 else self.fit_roi2,
                 'lcd': self.lcd if idx == 0 else self.lcd2,
@@ -455,6 +482,9 @@ class BeamTracker2(gutils.CustomApp):
     def show_viewers(self, do_show: bool):
         self.camera_viewer.parent.parent().setVisible(do_show)
         self.camera_viewer2.parent.parent().setVisible(do_show)
+
+    def _on_viewer_initialized(self, viewer_idx):
+        self.set_camera_presets(viewer_idx)
 
     def quit_app(self):
         try:
