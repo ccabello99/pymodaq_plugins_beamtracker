@@ -55,13 +55,14 @@ class BeamTracker1(gutils.CustomApp):
         ]}
     ]
 
-    def __init__(self, parent: gutils.DockArea):
+    def __init__(self, parent: gutils.DockArea, config_name: str):
         super().__init__(parent)
 
         self.pixel_calibration = 1.0
         self.units = 'um'
 
         self.viewer = {}
+        self.config_name = config_name
         self.config = {}
 
         self.setup_config()
@@ -130,7 +131,7 @@ class BeamTracker1(gutils.CustomApp):
                         param.sigValueChanged.emit(param, param.value())
 
     def setup_config(self):
-        config_template_path = Path(__file__).parent.joinpath('resources/config_template.toml')        
+        config_template_path = Path(__file__).parent.joinpath(f'resources/{self.config_name}.toml')        
         with open(config_template_path, "rb") as f:
             self.config = tomllib.load(f)
 

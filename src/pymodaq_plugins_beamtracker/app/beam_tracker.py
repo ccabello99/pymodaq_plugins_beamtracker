@@ -15,6 +15,12 @@ def main():
         default=1,
         help="Number of cameras to use (1 or 2). Default = 1"
     )
+    parser.add_argument(
+        "--config", "-c",
+        type=str,
+        default="config_template",
+        help="Name of config file to use"
+    )        
     args = parser.parse_args()
 
     app = mkQApp("BeamTracker")
@@ -24,9 +30,9 @@ def main():
     mainwindow.setCentralWidget(dockarea)
 
     if args.mode == 1:
-        prog = bt1.BeamTracker1(dockarea)
+        prog = bt1.BeamTracker1(dockarea, args.config)
     elif args.mode == 2:
-        prog = bt2.BeamTracker2(dockarea)
+        prog = bt2.BeamTracker2(dockarea, args.config)
     mainwindow.show()
     app.exec()
 
