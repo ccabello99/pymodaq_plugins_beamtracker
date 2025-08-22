@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import tomllib
 import platform
 from pathlib import Path
+import random
 
 from pymodaq.utils import gui_utils as gutils
 from pymodaq.utils.config import Config
@@ -139,20 +140,6 @@ class BeamTracker2(gutils.CustomApp):
         self.camera_viewer2.init_hardware(do_init=self.config['camera_viewers']['second']['do_init'])
         QtWidgets.QApplication.processEvents()
 
-        self.fit_roi = EllipseROI(index=0, pos=[0,0], size=[10,10])
-        self.fit_roi.setPen(QtGui.QPen(QtGui.QColor(255,0,0),0.05))
-        self.fit_roi.setZValue(10)
-        self.fit_roi.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-        self.fit_roi.setVisible(False)
-        self.target_viewer.view.plotitem.addItem(self.fit_roi)
-
-        self.fit_roi2 = EllipseROI(index=0, pos=[0,0], size=[10,10])
-        self.fit_roi2.setPen(QtGui.QPen(QtGui.QColor(255,0,0),0.05))
-        self.fit_roi2.setZValue(10)
-        self.fit_roi2.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-        self.fit_roi2.setVisible(False)
-        self.target_viewer2.view.plotitem.addItem(self.fit_roi2)
-
     def setup_actions(self): 
         self.add_action('snap', 'Snap Data', 'Snapshot2_32', tip='Click to get one data shot') 
         self.add_action('grab', 'Grab', 'camera', checkable=True, tip="Grab from camera") 
@@ -230,7 +217,7 @@ class BeamTracker2(gutils.CustomApp):
             self.viewers.append({
                 'camera_viewer': self.camera_viewer if idx == 0 else self.camera_viewer2,
                 'viewer': self.target_viewer if idx == 0 else self.target_viewer2,
-                'roi': self.fit_roi if idx == 0 else self.fit_roi2,
+                'roi': None,
                 'lcd': self.lcd if idx == 0 else self.lcd2,
                 'show_ellipse': False,
                 'show_lineout': False,
@@ -240,6 +227,7 @@ class BeamTracker2(gutils.CustomApp):
                 'latest_frame': None,
                 'worker_busy': False,
                 '_saving_roi': False,
+                '_loading_roi': False,
                 'frame_id': 0,
             })
 
@@ -304,10 +292,13 @@ class BeamTracker2(gutils.CustomApp):
     def _update_fit_roi(self, x, y, dmajor, dminor, theta, viewer_idx):
         viewer_info = self.viewers[viewer_idx]
         viewer = viewer_info['viewer']
-        roi = viewer_info['roi']
+
         if (not viewer_info['show_ellipse'] or viewer_info['latest_frame'] is None
             or dmajor == 0 or dminor == 0):
-            roi.setVisible(False)
+            try:
+                viewer.view.plotitem.removeItem(self.viewers[viewer_idx]['roi'])
+            except Exception:
+                pass
             return
 
         if viewer.view.ROIselect.isVisible():
@@ -319,16 +310,23 @@ class BeamTracker2(gutils.CustomApp):
 
         global_x = roi_x0 + x
         global_y = roi_y0 + y
+        global_center = QtCore.QPointF(global_x, global_y)
 
         xmin, xmax, ymin, ymax = self.get_bounding_rect(dmajor/2, dminor/2, theta, center=(global_x, global_y))
         width, height = np.abs(xmax-xmin), np.abs(ymax-ymin)
         size_view = [width, height]
 
+        viewer.view.plotitem.removeItem(self.viewers[viewer_idx]['roi'])
+        roi = EllipseROI(index=0, pos = [global_x - width/2, global_y - width/2], 
+                         size = size_view)
         roi.set_center((global_x, global_y))
-        roi.setSize(size_view, center=(0.5, 0.5))
-        # TODO make work. changing ROI angle always shifts ellipse off center
-        #roi.setAngle(-theta * 180 / np.pi, center=(0.5, 0.5))
-        viewer.view.set_crosshair_position(global_x, global_y)
+        roi.setAngle(-theta*180/np.pi, center=(0.5, 0.5))
+        roi.setPen(QtGui.QPen(QtGui.QColor(255,0,0),0.05))
+        roi.setZValue(10) 
+        roi.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        self.viewers[viewer_idx]['roi'] = roi
+        viewer.view.plotitem.addItem(roi)
+        viewer.view.set_crosshair_position(global_center.x(), global_center.y())
         roi.setVisible(True)
 
         if viewer_info['show_lineout']:
@@ -441,7 +439,8 @@ class BeamTracker2(gutils.CustomApp):
                 latest_roi.setPos(pos)
                 latest_roi.setSize(size)
                 latest_roi.setAngle(angle)
-                latest_roi.setPen(QtGui.QPen(QtGui.QColor(255,0,0), 0.1))
+                r, g, b = [random.randint(100, 255) for _ in range(3)]
+                latest_roi.setPen(QtGui.QPen(QtGui.QColor(r, g, b), 0.1))
             finally:
                 viewer_info['_saving_roi'] = False
                 param.blockSignals(True)
@@ -453,11 +452,16 @@ class BeamTracker2(gutils.CustomApp):
                 xml_path = self.settings1.child('load_saved_rois', 'load_rois_file').value()
             else:
                 xml_path = self.settings2.child('load_saved_rois', 'load_rois_file').value()
-            if not xml_path or not os.path.isfile(xml_path):
+            if not xml_path or not os.path.isfile(xml_path) or viewer_info['_loading_roi']:
                 return
-            self.load_roi_from_xml(viewer, xml_path)
-            param.setValue(False)
-            param.sigValueChanged.emit(param, False)
+            viewer_info['_loading_roi'] = True
+            try:
+                self.load_roi_from_xml(viewer, xml_path)
+            finally:
+                viewer_info['_loading_roi'] = False
+                param.blockSignals(True)
+                param.setValue(False)
+                param.blockSignals(False)
 
     def load_roi_from_xml(self, viewer, xml_path):
         tree = ET.parse(xml_path)
@@ -484,7 +488,8 @@ class BeamTracker2(gutils.CustomApp):
             roi.setSize([width, height])
             roi.setAngle(angle)
             if color:
-                roi.setPen(QtGui.QPen(QtGui.QColor(255,0,0),0.05))
+                roi.setPen(color)
+                
                 
     def get_bounding_rect(self, a, b, theta, center=(0.0, 0.0)):
         cx, cy = center

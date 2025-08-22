@@ -4,6 +4,7 @@ import os
 import xml.etree.ElementTree as ET
 import tomllib
 from pathlib import Path
+import platform
 
 from pymodaq.utils import gui_utils as gutils
 from pymodaq.utils.config import Config
@@ -15,6 +16,7 @@ from pymodaq.control_modules.daq_viewer import DAQ_Viewer
 from pymodaq.utils.data import DataToExport, DataFromPlugins, Axis
 from pymodaq_gui.managers.roi_manager import EllipseROI
 from pyqtgraph.parametertree import Parameter, ParameterTree
+import random
 
 from pymodaq_plugins_beamtracker.utils import Config as PluginConfig
 import laserbeamsize as lbs
@@ -64,6 +66,11 @@ class BeamTracker1(gutils.CustomApp):
         self.viewer = {}
         self.config_name = config_name
         self.config = {}
+        if platform.system() == "Windows":
+            docs = Path(os.environ.get("USERPROFILE", Path.home())) / "Documents"
+        else:
+            docs = Path.home() / "Documents"
+        self.configs_dir = docs / "BeamTracker_configs"
 
         self.setup_config()
         self.setup_ui()
@@ -92,15 +99,8 @@ class BeamTracker1(gutils.CustomApp):
         self.camera_viewer = DAQ_Viewer(dockarea, title='Beam Tracker', daq_type='DAQ2D') 
         self.camera_viewer.detector = self.config['detector']
         self.camera_viewer.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_name'])
-        self.camera_viewer.init_signal.connect(self._on_viewer_initialized)
+        self.camera_viewer.init_signal.connect(lambda _: self._on_viewer_initialized(camera_viewer=self.camera_viewer, target_viewer=self.target_viewer))
         self.camera_viewer.init_hardware(do_init=self.config['do_init'])
-
-        self.fit_roi = EllipseROI(index=0, pos=[0,0], size=[10,10]) 
-        self.fit_roi.setPen(QtGui.QPen(QtGui.QColor(255,0,0),0.05))
-        self.fit_roi.setZValue(10) 
-        self.fit_roi.setAcceptedMouseButtons(QtCore.Qt.NoButton) 
-        self.fit_roi.setVisible(False)
-        self.target_viewer.view.plotitem.addItem(self.fit_roi) 
 
     def setup_actions(self): 
         self.add_action('snap', 'Snap Data', 'Snapshot2_32', tip='Click to get one data shot') 
@@ -120,18 +120,21 @@ class BeamTracker1(gutils.CustomApp):
             lambda dte: self._on_new_frame(dte)
         )
 
-    def set_camera_presets(self):
+    def set_camera_presets(self, camera_viewer, target_viewer):
         cam_props = self.config.get("camera_properties", {})
         for key, val in cam_props.items():
             if isinstance(val, dict):
                 for prop, value in val.items():
-                    param = self.camera_viewer.settings.child('detector_settings', str(key), str(prop))
+                    param = camera_viewer.settings.child('detector_settings', str(key), str(prop))
                     if param is not None:
                         param.setValue(value)
                         param.sigValueChanged.emit(param, param.value())
+        if self.config['references']['use_references']:
+            xml_path = f"{self.configs_dir}/{self.config['references']['reference']}.xml"
+            self.load_roi_from_xml(target_viewer, xml_path)
 
     def setup_config(self):
-        config_template_path = Path(__file__).parent.joinpath(f'resources/{self.config_name}.toml')        
+        config_template_path = Path(__file__).parent.joinpath(f'{self.configs_dir}/{self.config_name}.toml')        
         with open(config_template_path, "rb") as f:
             self.config = tomllib.load(f)
 
@@ -153,7 +156,7 @@ class BeamTracker1(gutils.CustomApp):
 
             self.viewer = {
                 'viewer': self.target_viewer,
-                'roi': self.fit_roi,
+                'roi': None,
                 'lcd': self.lcd,
                 'show_ellipse': False,
                 'show_lineout': False,
@@ -163,6 +166,7 @@ class BeamTracker1(gutils.CustomApp):
                 'latest_frame': None,
                 'worker_busy': False,
                 '_saving_roi': False,
+                '_loading_roi': False,
                 'frame_id': 0,
             }
 
@@ -227,11 +231,13 @@ class BeamTracker1(gutils.CustomApp):
     def _update_fit_roi(self, x, y, dmajor, dminor, theta):
         viewer_info = self.viewer
         viewer = viewer_info['viewer']
-        roi = viewer_info['roi']
 
         if (not viewer_info['show_ellipse'] or viewer_info['latest_frame'] is None
             or dmajor == 0 or dminor == 0):
-            roi.setVisible(False)
+            try:
+                viewer.view.plotitem.removeItem(self.viewer['roi'])
+            except Exception:
+                pass
             return
 
         if viewer.view.ROIselect.isVisible():
@@ -243,16 +249,23 @@ class BeamTracker1(gutils.CustomApp):
 
         global_x = roi_x0 + x
         global_y = roi_y0 + y
+        global_center = QtCore.QPointF(global_x, global_y)
 
         xmin, xmax, ymin, ymax = self.get_bounding_rect(dmajor/2, dminor/2, theta, center=(global_x, global_y))
         width, height = np.abs(xmax-xmin), np.abs(ymax-ymin)
         size_view = [width, height]
 
+        viewer.view.plotitem.removeItem(self.viewer['roi'])
+        roi = EllipseROI(index=0, pos = [global_x - width/2, global_y - width/2], 
+                         size = size_view)
         roi.set_center((global_x, global_y))
-        roi.setSize(size_view, center=(0.5, 0.5))
-        # TODO make work. changing ROI angle always shifts ellipse off center
-        #roi.setAngle(-theta * 180 / np.pi, center=(0.5, 0.5))
-        viewer.view.set_crosshair_position(global_x, global_y)
+        roi.setAngle(-theta*180/np.pi, center=(0.5, 0.5))
+        roi.setPen(QtGui.QPen(QtGui.QColor(255,0,0),0.05))
+        roi.setZValue(10) 
+        roi.setAcceptedMouseButtons(QtCore.Qt.NoButton) 
+        self.viewer['roi'] = roi
+        viewer.view.plotitem.addItem(roi)
+        viewer.view.set_crosshair_position(global_center.x(), global_center.y())
         roi.setVisible(True)
 
         if viewer_info['show_lineout']:
@@ -350,7 +363,7 @@ class BeamTracker1(gutils.CustomApp):
                 lbl.setText(new_text)
 
         elif param.name() == 'save_ellipse':
-            if viewer_info['_saving_roi']:
+            if viewer_info['_saving_roi'] or fit_roi is None:
                 return
             viewer_info['_saving_roi'] = True
             try:
@@ -363,6 +376,8 @@ class BeamTracker1(gutils.CustomApp):
                 latest_roi.setPos(pos)
                 latest_roi.setSize(size)
                 latest_roi.setAngle(angle)
+                r, g, b = [random.randint(0, 255) for _ in range(3)]
+                latest_roi.setPen(QtGui.QPen(QtGui.QColor(r, g, b), 0.1))
             finally:
                 viewer_info['_saving_roi'] = False
                 param.blockSignals(True)
@@ -371,35 +386,43 @@ class BeamTracker1(gutils.CustomApp):
 
         elif param.name() == 'load_rois':
             xml_path = self.settings.child('load_saved_rois', 'load_rois_file').value()
-            if not xml_path or not os.path.isfile(xml_path):
+            if not xml_path or not os.path.isfile(xml_path) or viewer_info['_loading_roi']:
                 return
-            tree = ET.parse(xml_path)
-            root = tree.getroot()
+            viewer_info['_loading_roi'] = True
+            try:
+                self.load_roi_from_xml(viewer, xml_path)
+            finally:
+                viewer_info['_loading_roi'] = False
+                param.blockSignals(True)
+                param.setValue(False)
+                param.blockSignals(False)
 
-            for roi_group in root.findall("./*"):  
-                roi_type = roi_group.find('roi_type').text
+    def load_roi_from_xml(self, viewer, xml_path):
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
 
-                pos_x = float(roi_group.find('./position/x').text)
-                pos_y = float(roi_group.find('./position/y').text)
-                width = float(roi_group.find('./size/width').text)
-                height = float(roi_group.find('./size/height').text)
-                angle = float(roi_group.find('./angle').text)
+        for roi_group in root.findall("./*"):  
+            roi_type = roi_group.find('roi_type').text
 
-                color_node = roi_group.find('Color')
-                color = None
-                if color_node is not None:
-                    color = eval(color_node.text)
+            pos_x = float(roi_group.find('./position/x').text)
+            pos_y = float(roi_group.find('./position/y').text)
+            width = float(roi_group.find('./size/width').text)
+            height = float(roi_group.find('./size/height').text)
+            angle = float(roi_group.find('./angle').text)
 
-                viewer.view.roi_manager.add_roi_programmatically(roi_type)
-                roi_dict = viewer.view.roi_manager.ROIs
-                roi_key, roi = list(roi_dict.items())[-1]
-                roi.setPos([pos_x, pos_y])
-                roi.setSize([width, height])
-                roi.setAngle(angle)
-                if color:
-                    roi.setPen(color)
-            param.setValue(False)
-            param.sigValueChanged.emit(param, False)
+            color_node = roi_group.find('Color')
+            color = None
+            if color_node is not None:
+                color = eval(color_node.text)
+
+            viewer.view.roi_manager.add_roi_programmatically(roi_type)
+            roi_dict = viewer.view.roi_manager.ROIs
+            roi_key, roi = list(roi_dict.items())[-1]
+            roi.setPos([pos_x, pos_y])
+            roi.setSize([width, height])
+            roi.setAngle(angle)
+            if color:
+                roi.setPen(color)                    
 
     def get_bounding_rect(self, a, b, theta, center=(0.0, 0.0)):
         cx, cy = center
@@ -415,8 +438,8 @@ class BeamTracker1(gutils.CustomApp):
     def show_viewer(self, do_show: bool):
         self.camera_viewer.parent.parent().setVisible(do_show)
 
-    def _on_viewer_initialized(self):
-        self.set_camera_presets()
+    def _on_viewer_initialized(self, camera_viewer, target_viewer):
+        self.set_camera_presets(camera_viewer, target_viewer)
 
     def quit_app(self):
         try:

@@ -6,6 +6,11 @@ do_init = true
 detector = 'ImagingSource'
 camera_name = 'DMK 42BUC03'
 
+[references]
+use_references = false
+reference_1 = 'near-field'
+reference_2 = 'far-field'
+
 [camera_properties.exposure]
 ExposureAuto = false
 ExposureTime = 10
