@@ -20,7 +20,7 @@ def main():
         type=str,
         default="config_template",
         help="Name of config file to use"
-    )        
+    )
     args = parser.parse_args()
 
     app = mkQApp("BeamTracker")

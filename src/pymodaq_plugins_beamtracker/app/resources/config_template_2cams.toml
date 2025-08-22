@@ -2,6 +2,11 @@ title = 'this is the configuration file of the plugin BeamTracker'
 
 preset = 'preset_config'
 
+[references]
+use_references = false
+reference_1 = 'near-field'
+reference_2 = 'far-field'
+
 [camera_viewers.first]
 do_init = true
 detector = 'ImagingSource'
@@ -9,21 +14,21 @@ camera_name = 'DMK 42BUC03'
 
 [camera_viewers.second]
 do_init = true
-detector = 'Basler'
-camera_name = 'Basler puA1600-60um (25171432)'
+detector = 'ImagingSource'
+camera_name = 'DMK 42BUC03'
 
 [camera1_properties.exposure]
 ExposureAuto = false
-ExposureTime = 30
+ExposureTime = 200
 
 [camera1_properties.gain]
 GainAuto = false
-Gain = 15
+Gain = 1
 
 [camera2_properties.exposure]
 ExposureAuto = false
-ExposureTime = 20
+ExposureTime = 200
 
 [camera2_properties.gain]
 GainAuto = false
-Gain = 15
+Gain = 1

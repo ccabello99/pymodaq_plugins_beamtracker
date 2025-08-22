@@ -204,12 +204,12 @@ class BeamTracker1(gutils.CustomApp):
     def _on_worker_result(self, values, frame_id):
         info = self.viewer
         try:
-            x, y, dx, dy, theta = values
-            dx_cal = dx * self.pixel_calibration
-            dy_cal = dy * self.pixel_calibration
+            x, y, dmajor, dminor, theta = values
+            dmajor_cal = dmajor * self.pixel_calibration
+            dminor_cal = dminor * self.pixel_calibration
 
-            info['lcd'].setvalues([np.array([t]) for t in (x, y, dx_cal, dy_cal, theta)])
-            self._update_fit_roi(x, y, dx, dy, theta)
+            info['lcd'].setvalues([np.array([t]) for t in (x, y, dmajor_cal, dminor_cal, theta)])
+            self._update_fit_roi(x, y, dmajor, dminor, theta)
         except Exception:
             logger.exception(f"_on_worker_result failed:")
         finally:
@@ -224,13 +224,13 @@ class BeamTracker1(gutils.CustomApp):
             return
         info['worker_busy'] = False
 
-    def _update_fit_roi(self, x, y, dx, dy, theta):
+    def _update_fit_roi(self, x, y, dmajor, dminor, theta):
         viewer_info = self.viewer
         viewer = viewer_info['viewer']
         roi = viewer_info['roi']
 
         if (not viewer_info['show_ellipse'] or viewer_info['latest_frame'] is None
-            or dx == 0 or dy == 0):
+            or dmajor == 0 or dminor == 0):
             roi.setVisible(False)
             return
 
@@ -244,31 +244,19 @@ class BeamTracker1(gutils.CustomApp):
         global_x = roi_x0 + x
         global_y = roi_y0 + y
 
-        if (global_x - dx < 0 
-            or global_x + dx > roi_w + roi_x0 
-            or global_y - dy < 0 
-            or global_y + dy > roi_h + roi_y0):            
-            roi.setVisible(False)
-            return
-
-        if dx > dy:
-            width, height = dx, dy
-            angle = theta
-        else:
-            width, height = dy, dx
-            angle = theta + 90
-
+        xmin, xmax, ymin, ymax = self.get_bounding_rect(dmajor/2, dminor/2, theta, center=(global_x, global_y))
+        width, height = np.abs(xmax-xmin), np.abs(ymax-ymin)
         size_view = [width, height]
-        top_left = [global_x - height/2, global_y + width/2]
 
-        roi.setSize(size_view)
-        roi.setPos(top_left)
-        roi.setAngle(angle-90, centerLocal=[global_x, global_y])
+        roi.set_center((global_x, global_y))
+        roi.setSize(size_view, center=(0.5, 0.5))
+        # TODO make work. changing ROI angle always shifts ellipse off center
+        #roi.setAngle(-theta * 180 / np.pi, center=(0.5, 0.5))
         viewer.view.set_crosshair_position(global_x, global_y)
         roi.setVisible(True)
 
         if viewer_info['show_lineout']:
-            gaussian_fit = (x, y, dx/2, dy/2, angle-(np.pi / 2))
+            gaussian_fit = (x, y, width/2, height/2, theta)
             self.get_crosshair_data_within_roi((roi_x0, roi_y0, roi_w, roi_h), gaussian_fit)
 
     def get_crosshair_data_within_roi(self, roi_bounds, gaussian_fit):
@@ -413,6 +401,17 @@ class BeamTracker1(gutils.CustomApp):
             param.setValue(False)
             param.sigValueChanged.emit(param, False)
 
+    def get_bounding_rect(self, a, b, theta, center=(0.0, 0.0)):
+        cx, cy = center
+
+        x_max = np.sqrt((a * np.cos(theta))**2 + (b * np.sin(theta))**2)
+        y_max = np.sqrt((a * np.sin(theta))**2 + (b * np.cos(theta))**2)
+
+        x_min, x_max = cx - x_max, cx + x_max
+        y_min, y_max = cy - y_max, cy + y_max
+
+        return x_min, x_max, y_min, y_max            
+
     def show_viewer(self, do_show: bool):
         self.camera_viewer.parent.parent().setVisible(do_show)
 
@@ -453,7 +452,8 @@ def main():
     dockarea = gutils.DockArea()
     mainwindow.setCentralWidget(dockarea)
 
-    prog = BeamTracker1(dockarea)
+    default_config_name = 'config_template'
+    prog = BeamTracker1(dockarea, default_config_name)
 
     mainwindow.show()
     app.exec()
