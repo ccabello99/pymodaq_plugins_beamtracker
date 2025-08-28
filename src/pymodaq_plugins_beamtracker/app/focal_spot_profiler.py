@@ -3,9 +3,8 @@ import numpy as np
 import os
 import xml.etree.ElementTree as ET
 import tomllib
-import platform
 from pathlib import Path
-import random
+import platform
 
 from pymodaq.utils import gui_utils as gutils
 from pymodaq.utils.config import Config
@@ -17,9 +16,11 @@ from pymodaq.control_modules.daq_viewer import DAQ_Viewer
 from pymodaq.utils.data import DataToExport, DataFromPlugins, Axis
 from pymodaq_gui.managers.roi_manager import EllipseROI
 from pyqtgraph.parametertree import Parameter, ParameterTree
+import random
 
 from pymodaq_plugins_beamtracker.utils import Config as PluginConfig
 import laserbeamsize as lbs
+from scipy import integrate
 
 logger = set_logger(get_module_name(__file__))
 
@@ -41,109 +42,92 @@ class BeamSizeWorker(QtCore.QObject):
             self.error.emit(f"Beam size computation failed: {e}", frame_id)
 
 
-class BeamTracker2(gutils.CustomApp):
+class FocalSpotProfiler(gutils.CustomApp):
     params = [
-        {'title': 'Viewer Index', 'name': 'viewer_idx',
-         'type': 'int', 'value': 0, 'limits': [0, 1]},
         {'title': 'Gaussian overlay', 'name': 'roi', 'type': 'group', 'children': [
             {'title': 'Show ellipse', 'name': 'show_ellipse', 'type': 'led_push', 'value': False, 'default': False},
             {'title': 'Show lineout', 'name': 'show_lineout', 'type': 'led_push', 'value': False, 'default': False},
             {'title': 'Pixel calibration', 'name': 'pixel_calibration', 
              'type': 'float', 'value': 1.0, 'default': 1.0, 'tip': 'Distance per pixel'},
             {'title': 'Units', 'name': 'units', 'type': 'list', 'limits': ['pixels', 'um', 'mm', 'cm'], 'default': 'pixels'},
-            {'title': 'Save current ROI', 'name': 'save_ellipse', 'type': 'bool_push', 'value': False, 'default': False},            
         ]},
-        {'title': 'Load saved ROIs', 'name': 'load_saved_rois', 'type': 'group', 'children': [
-            {'title': 'Saving Base Path:', 'name': 'load_rois_file', 'type': 'browsepath', 'value': '', 'filetype': True},
-            {'title': 'Load ROIs', 'name': 'load_rois', 'type': 'bool_push', 'value': False, 'default': False}
-        ]},
+        {'title': 'Pulse energy (mJ)', 'name': 'pulse_energy', 'type': 'float', 'value': 1.0, 'default': 1.0},
+        {'title': 'Pulse duration[FWHM] (fs)', 'name': 'pulse_duration', 'type': 'float', 'value': 1.0, 'default': 1.0},
+        {'title': 'Aperture Diameter (mm)', 'name': 'aperture_diameter', 'type': 'float', 'value': 1.0, 'default': 1.0},
+        {'title': 'Near-field beam diameter (mm)', 'name': 'nf_beam_diameter', 'type': 'float', 'value': 1.0, 'default': 1.0},
         {'title': 'Config Base Path:', 'name': 'config_base_path', 'type': 'browsepath', 'value': '', 'filetype': False},
     ]
 
-    def __init__(self, parent: gutils.DockArea, config_name):
+    def __init__(self, parent: gutils.DockArea, config_name: str):
         super().__init__(parent)
 
         self.pixel_calibration = 1.0
-        self.units = 'um'
+        self.units = 'pixels'
+        self.scaling = {
+            'pixels': 1,
+            'um': 1e-6,
+            'mm': 1e-3,
+            'cm': 1e-2
+        }
 
-        self.viewers = {}  # will store all per-viewer info
+        self.viewer = {
+            'viewer': None,
+            'roi': None,
+            'lcd': None,
+            'show_ellipse': False,
+            'show_lineout': False,
+            'worker': None,
+            'thread': None,
+            'input': None,
+            'latest_frame': None,
+            'worker_busy': False,
+            '_saving_roi': False,
+            '_loading_roi': False,
+            'frame_id': 0,
+        }
         self.config_name = config_name
         self.config = {}
-        self.qsettings = QtCore.QSettings("PyMoDAQ", "BeamTracker")
+        self.qsettings = QtCore.QSettings("PyMoDAQ", "FocalSpotProfiler")
         if platform.system() == "Windows":
-            self.configs_dir = self.qsettings.value('beam_tracker_configs/basepath', 
+            self.configs_dir = self.qsettings.value('focal_spot_configs/basepath', 
                                    Path(os.environ.get("USERPROFILE", Path.home())) / "Documents")
         else:
-            self.configs_dir = self.qsettings.value('beam_tracker_configs/basepath', 
+            self.configs_dir = self.qsettings.value('focal_spot_configs/basepath', 
                                    os.path.join(os.path.expanduser('~'), 'Documents'))
         self.settings.param('config_base_path').setValue(self.configs_dir)
-
-        self.count = 0
 
         self.setup_config()
         self.setup_ui()
         self._setup_worker_threads()
-        self.show_viewers(True)
+        self.show_viewer(True)
 
     def setup_docks(self):
-        self.docks['viewer2D'] = gutils.Dock('Beam Tracker 1')
+        self.docks['viewer2D'] = gutils.Dock('Focal Spot Profiler')
         self.dockarea.addDock(self.docks['viewer2D'])
         self.target_viewer = Viewer2D(QtWidgets.QWidget())
         self.docks['viewer2D'].addWidget(self.target_viewer.parent)
 
-        self.docks['viewer2D_2'] = gutils.Dock('Beam Tracker 2')
-        self.dockarea.addDock(self.docks['viewer2D_2'], 'right', self.docks['viewer2D'])
-        self.target_viewer2 = Viewer2D(QtWidgets.QWidget())
-        self.docks['viewer2D_2'].addWidget(self.target_viewer2.parent)   
-
         self.docks['lcds'] = gutils.Dock('Beam properties')
-        self.dockarea.addDock(self.docks['lcds'], 'bottom', self.docks['viewer2D'])
-        self.lcd = LCD(QtWidgets.QWidget(), Nvals=5, labels=['x0', 'y0', f'd_major ({self.units})',
-                                                            f'd_minor ({self.units})', 'phi (deg)'])
+        self.dockarea.addDock(self.docks['lcds'], 'right', self.docks['viewer2D'])
+        self.lcd = LCD(QtWidgets.QWidget(), Nvals=5, digits=4, labels=[f'd_major ({self.units})',
+                                                            f'd_minor ({self.units})',
+                                                            'phi (deg)',
+                                                            'Intensity (W/cm^2) x 10^(18)',
+                                                            'Strehl Ratio'])
         self.docks['lcds'].addWidget(self.lcd.parent)
 
-        self.docks['lcds_2'] = gutils.Dock('Beam properties')
-        self.dockarea.addDock(self.docks['lcds_2'], 'bottom', self.docks['viewer2D_2'])
-        self.lcd2 = LCD(QtWidgets.QWidget(), Nvals=5, labels=['x0', 'y0', f'd_major ({self.units})',
-                                                            f'd_minor ({self.units})', 'phi (deg)'])
-        self.docks['lcds_2'].addWidget(self.lcd2.parent)
-
-        self.settings_tree1 = ParameterTree()
-        self.settings1 = Parameter.create(name='Beam Tracker 1', type='group', children=self.params)
-        self.settings_tree1.setParameters(self.settings1)
         self.docks['settings'] = gutils.Dock('Settings')
-        self.dockarea.addDock(self.docks['settings'], 'below', self.docks['lcds'])
-        self.docks['settings'].addWidget(self.settings_tree1)
-
-        self.settings_tree2 = ParameterTree()
-        self.settings2 = Parameter.create(name='Beam Tracker 2', type='group', children=self.params)
-        self.settings_tree2.setParameters(self.settings2)
-        self.settings2.child('viewer_idx').setValue(1)
-        self.docks['settings_2'] = gutils.Dock('Settings')
-        self.dockarea.addDock(self.docks['settings_2'], 'below', self.docks['lcds_2'])
-        self.docks['settings_2'].addWidget(self.settings_tree2)
-
+        self.dockarea.addDock(self.docks['settings'], 'bottom')
+        self.docks['settings'].addWidget(self.settings_tree)
+       
         cam_window = QtWidgets.QMainWindow() 
         dockarea = gutils.DockArea()
         cam_window.setCentralWidget(dockarea) 
-        self.camera_viewer = DAQ_Viewer(dockarea, title='Beam Tracker 1', daq_type='DAQ2D') 
-        self.camera_viewer.detector = self.config['camera_viewers']['first']['detector']
-        self.camera_viewer.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_viewers']['first']['camera_name'])
-        self.camera_viewer.settings.child('main_settings', 'wait_time').setValue(200)
-        self.camera_viewer.init_signal.connect(lambda _: self._on_viewer_initialized(viewer_idx=0, camera_viewer=self.camera_viewer, target_viewer=self.target_viewer))
-        self.camera_viewer.init_hardware(do_init=self.config['camera_viewers']['first']['do_init'])
-        QtWidgets.QApplication.processEvents()
-
-        cam_window = QtWidgets.QMainWindow() 
-        dockarea = gutils.DockArea()
-        cam_window.setCentralWidget(dockarea) 
-        self.camera_viewer2 = DAQ_Viewer(dockarea, title='Beam Tracker 2', daq_type='DAQ2D') 
-        self.camera_viewer2.detector = self.config['camera_viewers']['second']['detector']
-        self.camera_viewer2.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_viewers']['second']['camera_name'])
-        self.camera_viewer2.settings.child('main_settings', 'wait_time').setValue(200)
-        self.camera_viewer2.init_signal.connect(lambda _: self._on_viewer_initialized(viewer_idx=1, camera_viewer=self.camera_viewer2, target_viewer=self.target_viewer2))
-        self.camera_viewer2.init_hardware(do_init=self.config['camera_viewers']['second']['do_init'])
-        QtWidgets.QApplication.processEvents()
+        self.camera_viewer = DAQ_Viewer(dockarea, title='Focal Spot Profiler', daq_type='DAQ2D') 
+        self.camera_viewer.detector = self.config['detector']
+        self.camera_viewer.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_name'])
+        self.camera_viewer.init_signal.connect(lambda _: self._on_viewer_initialized(camera_viewer=self.camera_viewer, target_viewer=self.target_viewer))
+        self.camera_viewer.init_hardware(do_init=self.config['do_init'])
 
     def setup_actions(self): 
         self.add_action('snap', 'Snap Data', 'Snapshot2_32', tip='Click to get one data shot') 
@@ -156,32 +140,15 @@ class BeamTracker2(gutils.CustomApp):
         self.connect_action('snap', self.camera_viewer.snap)
         self.connect_action('grab', self.camera_viewer.grab)
         self.connect_action('stop', self.camera_viewer.stop)
-        self.connect_action('snap', self.camera_viewer2.snap)
-        self.connect_action('grab', self.camera_viewer2.grab)
-        self.connect_action('stop', self.camera_viewer2.stop)
-        self.connect_action('show', lambda do_show: self.show_viewers(do_show))
+        self.connect_action('show', lambda do_show: self.show_viewer(do_show))
         self.connect_action('quit', self.quit_app)
 
         self.camera_viewer.grab_done_signal.connect(
-            lambda dte: self._on_new_frame(dte, viewer_idx=0)
-        )
-        self.camera_viewer2.grab_done_signal.connect(
-            lambda dte: self._on_new_frame(dte, viewer_idx=1)
-        )   
-
-        self.settings1.sigTreeStateChanged.connect(
-            lambda tree_self, changes, viewer_idx=0: [
-                self.value_changed(param, viewer_idx) for param, change, info in changes
-            ]
-        )
-        self.settings2.sigTreeStateChanged.connect(
-            lambda tree_self, changes, viewer_idx=1: [
-                self.value_changed(param, viewer_idx) for param, change, info in changes
-            ]
+            lambda dte: self._on_new_frame(dte)
         )
 
-    def set_camera_presets(self, viewer_idx, camera_viewer, target_viewer):
-        cam_props = self.config.get("camera1_properties", {}) if viewer_idx == 0 else self.config.get("camera2_properties", {})
+    def set_camera_presets(self, camera_viewer, target_viewer):
+        cam_props = self.config.get("camera_properties", {})
         for key, val in cam_props.items():
             if isinstance(val, dict):
                 for prop, value in val.items():
@@ -190,21 +157,16 @@ class BeamTracker2(gutils.CustomApp):
                         param.setValue(value)
                         param.sigValueChanged.emit(param, param.value())
         if self.config['references']['use_references']:
-            if viewer_idx == 0:
-                xml_path = f"{self.configs_dir}/{self.config['references']['reference_1']}.xml"
-            else:
-                xml_path = f"{self.configs_dir}/{self.config['references']['reference_2']}.xml"
+            xml_path = f"{self.configs_dir}/{self.config['references']['reference']}.xml"
             self.load_roi_from_xml(target_viewer, xml_path)
-            
 
     def setup_config(self):
-        config_template_path = f'{self.configs_dir}/{self.config_name}.toml'
+        config_template_path = Path(__file__).parent.joinpath(f'{self.configs_dir}/{self.config_name}.toml')        
         with open(config_template_path, "rb") as f:
             self.config = tomllib.load(f)
 
+
     def _setup_worker_threads(self):
-        self.viewers = []
-        for idx in range(2):
             th = QtCore.QThread(self)
             w = BeamSizeWorker()
             w.moveToThread(th)
@@ -216,14 +178,13 @@ class BeamTracker2(gutils.CustomApp):
             inp = WorkerInput()
             inp.trigger.connect(w.process, QtCore.Qt.QueuedConnection)
 
-            w.result_ready.connect(lambda values, fid, _idx=idx: self._on_worker_result(values, fid, viewer_idx=_idx))
-            w.error.connect(lambda err_msg, fid, _idx=idx: self._on_worker_error(err_msg, fid, viewer_idx=_idx))
+            w.result_ready.connect(lambda values, fid: self._on_worker_result(values, fid))
+            w.error.connect(lambda err_msg, fid: self._on_worker_error(err_msg, fid))
 
-            self.viewers.append({
-                'camera_viewer': self.camera_viewer if idx == 0 else self.camera_viewer2,
-                'viewer': self.target_viewer if idx == 0 else self.target_viewer2,
+            self.viewer = {
+                'viewer': self.target_viewer,
                 'roi': None,
-                'lcd': self.lcd if idx == 0 else self.lcd2,
+                'lcd': self.lcd,
                 'show_ellipse': False,
                 'show_lineout': False,
                 'worker': w,
@@ -234,18 +195,18 @@ class BeamTracker2(gutils.CustomApp):
                 '_saving_roi': False,
                 '_loading_roi': False,
                 'frame_id': 0,
-            })
+            }
 
-    def _on_new_frame(self, dte, viewer_idx):
-        self.show_data(dte, viewer_idx=viewer_idx)
-        self._kick_analysis(viewer_idx=viewer_idx)            
+    def _on_new_frame(self, dte):
+        self.show_data(dte)
+        self._kick_analysis()            
 
-    def _kick_analysis(self, viewer_idx=None):
-        viewer_info = self.viewers[viewer_idx]
+    def _kick_analysis(self):
+        viewer_info = self.viewer
         viewer = viewer_info['viewer']
         viewer_info['frame_id'] += 1
         fid = viewer_info['frame_id']
-        if viewer_idx==None or fid%5 != 0 or viewer_info['latest_frame'] is None or viewer_info['worker_busy']:
+        if fid%5 != 0 or viewer_info['latest_frame'] is None or viewer_info['worker_busy']:
             return
 
         frame = viewer_info['latest_frame']
@@ -266,42 +227,82 @@ class BeamTracker2(gutils.CustomApp):
             x0, y0 = 0, 0 
             y1, x1 = nrows, ncols 
         frame_to_process = frame_to_process[y0:y1, x0:x1]
+        viewer_info['latest_frame'] = frame_to_process
 
         viewer_info['worker_busy'] = True
         viewer_info['input'].trigger.emit(frame_to_process, fid)
 
     @QtCore.Slot(object, int)
-    def _on_worker_result(self, values, frame_id, viewer_idx=0):
-        info = self.viewers[viewer_idx]
+    def _on_worker_result(self, values, frame_id):
+        info = self.viewer
+        viewer = info['viewer']
+        frame = info['latest_frame']
         try:
-            x, y, dmajor, dminor, theta = values
+            x0, y0, dmajor, dminor, theta = values
             dmajor_cal = dmajor * self.pixel_calibration
             dminor_cal = dminor * self.pixel_calibration
 
-            info['lcd'].setvalues([np.array([t]) for t in (x, y, dmajor_cal, dminor_cal, theta)])
-            self._update_fit_roi(x, y, dmajor, dminor, theta, viewer_idx)
+            width, height = frame.shape
+            x0_ = x0 * self.pixel_calibration * self.scaling[self.units]
+            y0_ = y0 * self.pixel_calibration * self.scaling[self.units]
+            x = np.linspace(-width*self.pixel_calibration*self.scaling[self.units]/2,
+                            width*self.pixel_calibration*self.scaling[self.units]/2, width)
+            y = np.linspace(-height*self.pixel_calibration*self.scaling[self.units]/2,
+                            height*self.pixel_calibration*self.scaling[self.units]/2, height)
+            dx = x[1] - x[0]
+            dy = y[1] - y[0]
+
+            # subtract camera offset
+            frame = frame - np.min(frame)
+            frame = np.clip(frame, 0, None)
+
+            # normalize to unit integral
+            norm = np.sum(frame) * dx * dy
+            I_phys = frame / norm
+
+            Aeff = 1.0 / (np.sum(I_phys**2) * dx * dy)
+
+            energy = self.settings.param('pulse_energy').value() * 1e-3
+            duration = self.settings.param('pulse_duration').value() * 1e-15
+            P = 0.94 * energy / duration
+
+            I0 = (P / Aeff) * 1e-4      # W/cm²
+            I_display = I0 * 1e-18      # scaled for LCD
+            energy = self.settings.param('pulse_energy').value() * 1e-3
+            duration = self.settings.param('pulse_duration').value() * 1e-15
+
+            P = 0.94 * energy / duration
+            I = P / Aeff * 1e-18 * 1e-4
+            #print(I)
+
+            strehl = self.calcStrehlRatio(x0_, y0_, x, y, frame, 
+                                          self.settings.param('aperture_diameter').value() * 1e-3,
+                                          self.settings.param('nf_beam_diameter').value() * 1e-3)
+
+            info['lcd'].setvalues([np.array([t]) for t in (dmajor_cal, dminor_cal, theta, I, strehl)])
+            self._update_fit_roi(x0, y0, dmajor, dminor, theta)
         except Exception:
-            logger.exception(f"_on_worker_result failed (viewer {viewer_idx}):")
+            logger.exception(f"_on_worker_result failed:")
         finally:
             info['worker_busy'] = False
 
 
     @QtCore.Slot(str, int)
-    def _on_worker_error(self, msg, frame_id, viewer_idx=0):
+    def _on_worker_error(self, msg, frame_id):
         logger.error(msg)
-        info = self.viewers[viewer_idx]
+        info = self.viewer
         if frame_id != info['frame_id']:
             return
         info['worker_busy'] = False
 
-    def _update_fit_roi(self, x, y, dmajor, dminor, theta, viewer_idx):
-        viewer_info = self.viewers[viewer_idx]
+    def _update_fit_roi(self, x, y, dmajor, dminor, theta):
+        viewer_info = self.viewer
         viewer = viewer_info['viewer']
 
         if (not viewer_info['show_ellipse'] or viewer_info['latest_frame'] is None
             or dmajor == 0 or dminor == 0):
             try:
-                viewer.view.plotitem.removeItem(self.viewers[viewer_idx]['roi'])
+                viewer.view.plotitem.removeItem(self.viewer['roi'])
             except Exception:
                 pass
             return
@@ -321,25 +322,25 @@ class BeamTracker2(gutils.CustomApp):
         width, height = np.abs(xmax-xmin), np.abs(ymax-ymin)
         size_view = [width, height]
 
-        viewer.view.plotitem.removeItem(self.viewers[viewer_idx]['roi'])
+        viewer.view.plotitem.removeItem(self.viewer['roi'])
         roi = EllipseROI(index=0, pos = [global_x - width/2, global_y - width/2], 
                          size = size_view)
         roi.set_center((global_x, global_y))
         roi.setAngle(-theta*180/np.pi, center=(0.5, 0.5))
         roi.setPen(QtGui.QPen(QtGui.QColor(255,0,0),0.05))
         roi.setZValue(10) 
-        roi.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-        self.viewers[viewer_idx]['roi'] = roi
+        roi.setAcceptedMouseButtons(QtCore.Qt.NoButton) 
+        self.viewer['roi'] = roi
         viewer.view.plotitem.addItem(roi)
         viewer.view.set_crosshair_position(global_center.x(), global_center.y())
         roi.setVisible(True)
 
         if viewer_info['show_lineout']:
             gaussian_fit = (x, y, width/2, height/2, theta)
-            self.get_crosshair_data_within_roi(viewer_idx, (roi_x0, roi_y0, roi_w, roi_h), gaussian_fit)
+            self.get_crosshair_data_within_roi((roi_x0, roi_y0, roi_w, roi_h), gaussian_fit)
 
-    def get_crosshair_data_within_roi(self, viewer_idx, roi_bounds, gaussian_fit):
-        viewer_info = self.viewers[viewer_idx]
+    def get_crosshair_data_within_roi(self, roi_bounds, gaussian_fit):
+        viewer_info = self.viewer
         viewer = viewer_info['viewer']
         frame = viewer_info['latest_frame']
         roi_x0, roi_y0, roi_w, roi_h = roi_bounds
@@ -378,10 +379,20 @@ class BeamTracker2(gutils.CustomApp):
             dwa_ver = DataFromPlugins(name='ver', data=[ver_raw, gauss_ver], dim='Data1D', labels=['crosshair_ver','gaussian_ver'], axes=[Axis(label='Pixels', data=y_axis_trim)])
             viewer.view.lineout_viewers['ver'].view.display_data(dwa_ver, displayer='crosshair')
 
-    def show_data(self, dte: DataToExport, viewer_idx=None):
-        if viewer_idx is None:
-            viewer_idx = self.settings.child('viewer_idx').value()
-        info = self.viewers[viewer_idx]
+    def calcStrehlRatio(self, x0, y0, x, y, I, aperture_diameter, nf_beam_diameter):
+
+        params = len(x), len(y), x, y, x0, y0
+        A0 = 255
+        near_field = A0*(Gaussian(params, nf_beam_diameter/2, nf_beam_diameter/2)**2)
+        
+        fx, fy, far_field = fraunhoffer(x*self.scaling[self.units], y*self.scaling[self.units], near_field, wavelength=780e-9)
+
+        strehl = I.max() / far_field.max()
+
+        return strehl         
+
+    def show_data(self, dte: DataToExport):
+        info = self.viewer
         try:
             dsrc = dte.get_data_from_source('raw')
             data2d_list = dsrc.get_data_from_dim('Data2D')
@@ -399,8 +410,8 @@ class BeamTracker2(gutils.CustomApp):
         except Exception as e:
             logger.error(f"show_data failed: {e}")     
 
-    def value_changed(self, param, viewer_idx=0):
-        viewer_info = self.viewers[viewer_idx]
+    def value_changed(self, param):
+        viewer_info = self.viewer
         viewer = viewer_info['viewer']
         fit_roi = viewer_info['roi']
         lcd = viewer_info['lcd']
@@ -425,81 +436,18 @@ class BeamTracker2(gutils.CustomApp):
 
         elif param.name() == 'units':
             self.units = param.value()
-            new_labels = ['x0', 'y0', f'd_major ({self.units})', f'd_minor ({self.units})', 'phi (deg)']
+            new_labels = [f'd_major ({self.units})',
+                                f'd_minor ({self.units})',
+                                'phi (deg)',
+                                'Intensity (W/cm^2) x 10^(18)',
+                                'Strehl Ratio']
             qlabels = lcd.parent.findChildren(QtWidgets.QLabel)
             for lbl, new_text in zip(qlabels, new_labels):
                 lbl.setText(new_text)
 
-        elif param.name() == 'save_ellipse':
-            if viewer_info['_saving_roi']:
-                return
-            viewer_info['_saving_roi'] = True
-            try:
-                viewer.view.roi_manager.add_roi_programmatically('EllipseROI')
-                roi_dict = viewer.view.roi_manager.ROIs
-                latest_key, latest_roi = list(roi_dict.items())[-1]
-                pos = fit_roi.pos()
-                size = fit_roi.size()
-                angle = fit_roi.angle()
-                latest_roi.setPos(pos)
-                latest_roi.setSize(size)
-                latest_roi.setAngle(angle)
-                r, g, b = [random.randint(100, 255) for _ in range(3)]
-                latest_roi.setPen(QtGui.QPen(QtGui.QColor(r, g, b), 0.1))
-            finally:
-                viewer_info['_saving_roi'] = False
-                param.blockSignals(True)
-                param.setValue(False)
-                param.blockSignals(False)
-
-        elif param.name() == 'load_rois':
-            if viewer_idx == 0:
-                xml_path = self.settings1.child('load_saved_rois', 'load_rois_file').value()
-            else:
-                xml_path = self.settings2.child('load_saved_rois', 'load_rois_file').value()
-            if not xml_path or not os.path.isfile(xml_path) or viewer_info['_loading_roi']:
-                return
-            viewer_info['_loading_roi'] = True
-            try:
-                self.load_roi_from_xml(viewer, xml_path)
-            finally:
-                viewer_info['_loading_roi'] = False
-                param.blockSignals(True)
-                param.setValue(False)
-                param.blockSignals(False)
-
         elif param.name() == 'config_base_path':
             self.qsettings.setValue('focal_spot_configs/basepath', param.value())
 
-    def load_roi_from_xml(self, viewer, xml_path):
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-
-        for roi_group in root.findall("./*"):  
-            roi_type = roi_group.find('roi_type').text
-
-            pos_x = float(roi_group.find('./position/x').text)
-            pos_y = float(roi_group.find('./position/y').text)
-            width = float(roi_group.find('./size/width').text)
-            height = float(roi_group.find('./size/height').text)
-            angle = float(roi_group.find('./angle').text)
-
-            color_node = roi_group.find('Color')
-            color = None
-            if color_node is not None:
-                color = eval(color_node.text)
-
-            viewer.view.roi_manager.add_roi_programmatically(roi_type)
-            roi_dict = viewer.view.roi_manager.ROIs
-            roi_key, roi = list(roi_dict.items())[-1]
-            roi.setPos([pos_x, pos_y])
-            roi.setSize([width, height])
-            roi.setAngle(angle)
-            roi.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-            if color:
-                roi.setPen(color)
-                
-                
     def get_bounding_rect(self, a, b, theta, center=(0.0, 0.0)):
         cx, cy = center
 
@@ -509,21 +457,18 @@ class BeamTracker2(gutils.CustomApp):
         x_min, x_max = cx - x_max, cx + x_max
         y_min, y_max = cy - y_max, cy + y_max
 
-        return x_min, x_max, y_min, y_max
+        return x_min, x_max, y_min, y_max            
 
-    def show_viewers(self, do_show: bool):
+    def show_viewer(self, do_show: bool):
         self.camera_viewer.parent.parent().setVisible(do_show)
-        self.camera_viewer2.parent.parent().setVisible(do_show)
 
-    def _on_viewer_initialized(self, viewer_idx, camera_viewer, target_viewer):
-        self.set_camera_presets(viewer_idx, camera_viewer, target_viewer)
+    def _on_viewer_initialized(self, camera_viewer, target_viewer):
+        self.set_camera_presets(camera_viewer, target_viewer)
 
     def quit_app(self):
         try:
             self.camera_viewer.quit_fun()
             self.camera_viewer.dockarea.parent().close()
-            self.camera_viewer2.quit_fun()
-            self.camera_viewer2.dockarea.parent().close()            
         except Exception:
             pass
         self.mainwindow.close()
@@ -545,17 +490,63 @@ def gaussian_lineout_y(y_axis, x0, y0, dx, dy, theta, x_cross, A=1.0):
     exponent = ((X * cos_t + Y * sin_t)**2) / (dx**2) + ((-X * sin_t + Y * cos_t)**2) / (dy**2)
     return A * np.exp(-exponent)
 
+def circular_aperture(params, R: float) -> np.ndarray:
+    Nx, Ny, x, y, x0, y0 = params[0], params[1], params[2], params[3], params[4], params[5]
 
-def main():
+    Y, X = np.meshgrid(y, x, indexing="xy")
+    x_diff = X - x0
+    y_diff = Y - y0
+
+    aperture = (x_diff**2 + y_diff**2 <= R**2).astype(float)
+
+    return aperture
+
+def Gaussian(params, wx: float, wy: float) -> np.ndarray:
+    Nx, Ny, x, y, x0, y0 = params[0], params[1], params[2], params[3], params[4], params[5]
+
+    wx2 = wx**2
+    wy2 = wy**2
+
+    Y, X = np.meshgrid(y, x, indexing="xy")
+    gauss = np.exp(-((X - x0)**2 / wx2) - ((Y - y0)**2 / wy2))
+
+    return gauss
+
+def fraunhoffer(p_x,p_y,image,wavelength=1e-10):
+
+    F1 = np.fft.fft2(image)
+    F2 = np.fft.fftshift( F1 )
+    far_field = np.abs(F2)**2
+    far_field /= far_field.max()
+
+    # frequency for axis 1
+    pixelsize = p_x[1] - p_x[0]
+    npixels = p_x.size
+    freq_nyquist = 0.5/pixelsize
+    freq_n = np.linspace(-1.0,1.0,npixels)
+    freq_x = freq_n * freq_nyquist
+    freq_x *= wavelength
+
+    # frequency for axis 2
+    pixelsize = p_y[1] - p_y[0]
+    npixels = p_y.size
+    freq_nyquist = 0.5/pixelsize
+    freq_n = np.linspace(-1.0,1.0,npixels)
+    freq_y = freq_n * freq_nyquist
+    freq_y *= wavelength
+
+    return freq_x,freq_y,far_field
+
+def main():   
     from pymodaq_gui.utils.utils import mkQApp
-    app = mkQApp('BeamTracker')
+    app = mkQApp('FocalSpotProfiler')
 
     mainwindow = QtWidgets.QMainWindow()
     dockarea = gutils.DockArea()
     mainwindow.setCentralWidget(dockarea)
 
-    default_config_name = 'config_template_2cams'
-    prog = BeamTracker2(dockarea, default_config_name)
+    default_config_name = 'config_template'
+    prog = FocalSpotProfiler(dockarea, default_config_name)
 
     mainwindow.show()
     app.exec()

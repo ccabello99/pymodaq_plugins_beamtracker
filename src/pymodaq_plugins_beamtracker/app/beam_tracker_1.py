@@ -48,13 +48,14 @@ class BeamTracker1(gutils.CustomApp):
             {'title': 'Show lineout', 'name': 'show_lineout', 'type': 'led_push', 'value': False, 'default': False},
             {'title': 'Pixel calibration', 'name': 'pixel_calibration', 
              'type': 'float', 'value': 1.0, 'default': 1.0, 'tip': 'Distance per pixel'},
-            {'title': 'Units', 'name': 'units', 'type': 'list', 'limits': ['um', 'mm', 'cm'], 'default': 'um'},
+            {'title': 'Units', 'name': 'units', 'type': 'list', 'limits': ['pixels', 'um', 'mm', 'cm'], 'default': 'pixels'},
             {'title': 'Save current ROI', 'name': 'save_ellipse', 'type': 'bool_push', 'value': False, 'default': False},            
         ]},
         {'title': 'Load saved ROIs', 'name': 'load_saved_rois', 'type': 'group', 'children': [
             {'title': 'Saving Base Path:', 'name': 'load_rois_file', 'type': 'browsepath', 'value': '', 'filetype': True},
             {'title': 'Load ROIs', 'name': 'load_rois', 'type': 'bool_push', 'value': False, 'default': False}
-        ]}
+        ]},
+        {'title': 'Config Base Path:', 'name': 'config_base_path', 'type': 'browsepath', 'value': '', 'filetype': False},
     ]
 
     def __init__(self, parent: gutils.DockArea, config_name: str):
@@ -63,14 +64,31 @@ class BeamTracker1(gutils.CustomApp):
         self.pixel_calibration = 1.0
         self.units = 'um'
 
-        self.viewer = {}
+        self.viewer = {
+            'viewer': None,
+            'roi': None,
+            'lcd': None,
+            'show_ellipse': False,
+            'show_lineout': False,
+            'worker': None,
+            'thread': None,
+            'input': None,
+            'latest_frame': None,
+            'worker_busy': False,
+            '_saving_roi': False,
+            '_loading_roi': False,
+            'frame_id': 0,
+        }
         self.config_name = config_name
         self.config = {}
+        self.qsettings = QtCore.QSettings("PyMoDAQ", "BeamTracker")
         if platform.system() == "Windows":
-            docs = Path(os.environ.get("USERPROFILE", Path.home())) / "Documents"
+            self.configs_dir = self.qsettings.value('beam_tracker_configs/basepath', 
+                                   Path(os.environ.get("USERPROFILE", Path.home())) / "Documents")
         else:
-            docs = Path.home() / "Documents"
-        self.configs_dir = docs / "BeamTracker_configs"
+            self.configs_dir = self.qsettings.value('beam_tracker_configs/basepath', 
+                                   os.path.join(os.path.expanduser('~'), 'Documents'))
+        self.settings.param('config_base_path').setValue(self.configs_dir)
 
         self.setup_config()
         self.setup_ui()
@@ -262,7 +280,7 @@ class BeamTracker1(gutils.CustomApp):
         roi.setAngle(-theta*180/np.pi, center=(0.5, 0.5))
         roi.setPen(QtGui.QPen(QtGui.QColor(255,0,0),0.05))
         roi.setZValue(10) 
-        roi.setAcceptedMouseButtons(QtCore.Qt.NoButton) 
+        roi.setAcceptedMouseButtons(QtCore.Qt.NoButton)
         self.viewer['roi'] = roi
         viewer.view.plotitem.addItem(roi)
         viewer.view.set_crosshair_position(global_center.x(), global_center.y())
@@ -397,6 +415,9 @@ class BeamTracker1(gutils.CustomApp):
                 param.setValue(False)
                 param.blockSignals(False)
 
+        elif param.name() == 'config_base_path':
+            self.qsettings.setValue('focal_spot_configs/basepath', param.value())
+
     def load_roi_from_xml(self, viewer, xml_path):
         tree = ET.parse(xml_path)
         root = tree.getroot()
@@ -421,6 +442,7 @@ class BeamTracker1(gutils.CustomApp):
             roi.setPos([pos_x, pos_y])
             roi.setSize([width, height])
             roi.setAngle(angle)
+            roi.setAcceptedMouseButtons(QtCore.Qt.NoButton)
             if color:
                 roi.setPen(color)                    
 
