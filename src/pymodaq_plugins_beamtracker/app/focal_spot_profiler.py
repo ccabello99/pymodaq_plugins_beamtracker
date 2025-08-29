@@ -88,13 +88,11 @@ class FocalSpotProfiler(gutils.CustomApp):
         self.config_name = config_name
         self.config = {}
         self.qsettings = QtCore.QSettings("PyMoDAQ", "FocalSpotProfiler")
-        if platform.system() == "Windows":
-            self.configs_dir = self.qsettings.value('focal_spot_configs/basepath', 
-                                   Path(os.environ.get("USERPROFILE", Path.home())) / "Documents")
+        stored = self.qsettings.value('focal_spot_configs/basepath', type=str)
+        if stored:
+            self.configs_dir = Path(str(stored))
         else:
-            self.configs_dir = self.qsettings.value('focal_spot_configs/basepath', 
-                                   os.path.join(os.path.expanduser('~'), 'Documents'))
-        self.settings.param('config_base_path').setValue(self.configs_dir)
+            self.configs_dir = Path.home() / "Documents"
 
         self.setup_config()
         self.setup_ui()
@@ -127,7 +125,7 @@ class FocalSpotProfiler(gutils.CustomApp):
         self.camera_viewer.detector = self.config['detector']
         self.camera_viewer.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_name'])
         self.camera_viewer.init_signal.connect(lambda _: self._on_viewer_initialized(camera_viewer=self.camera_viewer, target_viewer=self.target_viewer))
-        self.camera_viewer.init_hardware(do_init=self.config['do_init'])
+        self.camera_viewer.init_hardware_ui(do_init=self.config['do_init'])
 
     def setup_actions(self): 
         self.add_action('snap', 'Snap Data', 'Snapshot2_32', tip='Click to get one data shot') 
@@ -159,6 +157,7 @@ class FocalSpotProfiler(gutils.CustomApp):
         if self.config['references']['use_references']:
             xml_path = f"{self.configs_dir}/{self.config['references']['reference']}.xml"
             self.load_roi_from_xml(target_viewer, xml_path)
+        self.settings.param('config_base_path').setValue(self.configs_dir)            
 
     def setup_config(self):
         config_template_path = Path(__file__).parent.joinpath(f'{self.configs_dir}/{self.config_name}.toml')        
@@ -227,6 +226,8 @@ class FocalSpotProfiler(gutils.CustomApp):
             x0, y0 = 0, 0 
             y1, x1 = nrows, ncols 
         frame_to_process = frame_to_process[y0:y1, x0:x1]
+        frame_to_process = frame_to_process - np.min(frame_to_process)
+        frame_to_process = np.clip(frame_to_process, 0, None)
         viewer_info['latest_frame'] = frame_to_process
 
         viewer_info['worker_busy'] = True
@@ -242,40 +243,20 @@ class FocalSpotProfiler(gutils.CustomApp):
             dmajor_cal = dmajor * self.pixel_calibration
             dminor_cal = dminor * self.pixel_calibration
 
-            width, height = frame.shape
-            x0_ = x0 * self.pixel_calibration * self.scaling[self.units]
-            y0_ = y0 * self.pixel_calibration * self.scaling[self.units]
-            x = np.linspace(-width*self.pixel_calibration*self.scaling[self.units]/2,
-                            width*self.pixel_calibration*self.scaling[self.units]/2, width)
-            y = np.linspace(-height*self.pixel_calibration*self.scaling[self.units]/2,
-                            height*self.pixel_calibration*self.scaling[self.units]/2, height)
-            dx = x[1] - x[0]
-            dy = y[1] - y[0]
+            dx = self.pixel_calibration * self.scaling[self.units]
+            dy = dx
 
-            # subtract camera offset
-            frame = frame - np.min(frame)
-            frame = np.clip(frame, 0, None)
-
-            # normalize to unit integral
             norm = np.sum(frame) * dx * dy
             I_phys = frame / norm
-
             Aeff = 1.0 / (np.sum(I_phys**2) * dx * dy)
 
             energy = self.settings.param('pulse_energy').value() * 1e-3
             duration = self.settings.param('pulse_duration').value() * 1e-15
-            P = 0.94 * energy / duration
-
-            I0 = (P / Aeff) * 1e-4      # W/cm²
-            I_display = I0 * 1e-18      # scaled for LCD
-            energy = self.settings.param('pulse_energy').value() * 1e-3
-            duration = self.settings.param('pulse_duration').value() * 1e-15
 
             P = 0.94 * energy / duration
-            I = P / Aeff * 1e-18 * 1e-4
-            #print(I)
+            I = 2 * P / Aeff * 1e-18 * 1e-4
 
-            strehl = self.calcStrehlRatio(x0_, y0_, x, y, frame, 
+            strehl = self.calcStrehlRatio(frame, 
                                           self.settings.param('aperture_diameter').value() * 1e-3,
                                           self.settings.param('nf_beam_diameter').value() * 1e-3)
 
@@ -379,15 +360,29 @@ class FocalSpotProfiler(gutils.CustomApp):
             dwa_ver = DataFromPlugins(name='ver', data=[ver_raw, gauss_ver], dim='Data1D', labels=['crosshair_ver','gaussian_ver'], axes=[Axis(label='Pixels', data=y_axis_trim)])
             viewer.view.lineout_viewers['ver'].view.display_data(dwa_ver, displayer='crosshair')
 
-    def calcStrehlRatio(self, x0, y0, x, y, I, aperture_diameter, nf_beam_diameter):
+    def calcStrehlRatio(self, I_farfield, aperture_diameter, nf_beam_diameter):
 
-        params = len(x), len(y), x, y, x0, y0
-        A0 = 255
-        near_field = A0*(Gaussian(params, nf_beam_diameter/2, nf_beam_diameter/2)**2)
-        
-        fx, fy, far_field = fraunhoffer(x*self.scaling[self.units], y*self.scaling[self.units], near_field, wavelength=780e-9)
+        I_farfield = np.asarray(I_farfield, dtype=np.float64)
+        I_farfield /= np.sum(I_farfield)
 
-        strehl = I.max() / far_field.max()
+        # Generate ideal near-field (Gaussian) and propagate to far-field
+        N = 128
+        extent = nf_beam_diameter * 3
+        x_ = np.linspace(-extent, extent, N)
+        y_ = x_
+        x0, y0 = 0.0, 0.0
+        params = (N, N, x_, y_, x0, y0)
+        near_field_ideal = Gaussian(params, nf_beam_diameter/2, nf_beam_diameter/2)
+        aperture = circular_aperture(params, aperture_diameter/2)
+        near_field_ideal *= aperture
+
+        fx, fy, far_field_ideal = fraunhoffer(
+            x_, y_, near_field_ideal, wavelength=780e-9
+        )
+        far_field_ideal /= np.sum(far_field_ideal)
+
+        # Strehl ratio = peak measured far-field / peak ideal far-field
+        strehl = I_farfield.max() / far_field_ideal.max()
 
         return strehl         
 
@@ -447,6 +442,7 @@ class FocalSpotProfiler(gutils.CustomApp):
 
         elif param.name() == 'config_base_path':
             self.qsettings.setValue('focal_spot_configs/basepath', param.value())
+            self.qsettings.sync()
 
     def get_bounding_rect(self, a, b, theta, center=(0.0, 0.0)):
         cx, cy = center
@@ -465,8 +461,19 @@ class FocalSpotProfiler(gutils.CustomApp):
     def _on_viewer_initialized(self, camera_viewer, target_viewer):
         self.set_camera_presets(camera_viewer, target_viewer)
 
+    def cleanup_threads(self):
+        info = self.viewer
+        th = info.get('thread')
+        if th is not None:
+            try:
+                th.quit()
+                th.wait()
+            except Exception as e:
+                logger.error(f"Error stopping worker thread: {e}")
+
     def quit_app(self):
         try:
+            self.cleanup_threads()
             self.camera_viewer.quit_fun()
             self.camera_viewer.dockarea.parent().close()
         except Exception:
@@ -475,19 +482,19 @@ class FocalSpotProfiler(gutils.CustomApp):
 
 
 def gaussian_lineout_x(x_axis, x0, y0, dx, dy, theta, y_cross, A=1.0):
-    cos_t = np.cos(theta * np.pi / 180)
-    sin_t = np.sin(theta * np.pi / 180)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
     X = x_axis - x0
     Y = y_cross - y0
-    exponent = ((X * cos_t + Y * sin_t)**2) / (dx**2) + ((-X * sin_t + Y * cos_t)**2) / (dy**2)
+    exponent = (2*(X * cos_t + Y * sin_t)**2) / (dx**2) + (2*(-X * sin_t + Y * cos_t)**2) / (dy**2)
     return A * np.exp(-exponent)
 
 def gaussian_lineout_y(y_axis, x0, y0, dx, dy, theta, x_cross, A=1.0):
-    cos_t = np.cos(theta * np.pi / 180)
-    sin_t = np.sin(theta * np.pi / 180)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
     X = x_cross - x0
     Y = y_axis - y0
-    exponent = ((X * cos_t + Y * sin_t)**2) / (dx**2) + ((-X * sin_t + Y * cos_t)**2) / (dy**2)
+    exponent = (2*(X * cos_t + Y * sin_t)**2) / (dx**2) + (2*(-X * sin_t + Y * cos_t)**2) / (dy**2)
     return A * np.exp(-exponent)
 
 def circular_aperture(params, R: float) -> np.ndarray:
@@ -508,15 +515,15 @@ def Gaussian(params, wx: float, wy: float) -> np.ndarray:
     wy2 = wy**2
 
     Y, X = np.meshgrid(y, x, indexing="xy")
-    gauss = np.exp(-((X - x0)**2 / wx2) - ((Y - y0)**2 / wy2))
+    gauss = np.exp(-(2 * (X - x0)**2 / wx2) - (2 * (Y - y0)**2 / wy2))
 
     return gauss
 
 def fraunhoffer(p_x,p_y,image,wavelength=1e-10):
-
+    image = np.asarray(image, dtype=np.float64)
     F1 = np.fft.fft2(image)
     F2 = np.fft.fftshift( F1 )
-    far_field = np.abs(F2)**2
+    far_field = np.abs(F2)
     far_field /= far_field.max()
 
     # frequency for axis 1
@@ -537,16 +544,33 @@ def fraunhoffer(p_x,p_y,image,wavelength=1e-10):
 
     return freq_x,freq_y,far_field
 
-def main():   
+def main():
+    import argparse
     from pymodaq_gui.utils.utils import mkQApp
+
+    parser = argparse.ArgumentParser(description="Beam Tracker application")
+    parser.add_argument(
+        "--config", "-c",
+        type=str,
+        default="config_template",
+        help="Name of config file to use"
+    )
+    args = parser.parse_args()
+    default_config_name = 'config_template'
+    if args is None:
+        config = default_config_name
+    else:
+        config = args.config
     app = mkQApp('FocalSpotProfiler')
 
     mainwindow = QtWidgets.QMainWindow()
     dockarea = gutils.DockArea()
     mainwindow.setCentralWidget(dockarea)
 
-    default_config_name = 'config_template'
-    prog = FocalSpotProfiler(dockarea, default_config_name)
+    prog = FocalSpotProfiler(dockarea, config)
+    prog.mainwindow = mainwindow
+
+    app.aboutToQuit.connect(prog.cleanup_threads)
 
     mainwindow.show()
     app.exec()

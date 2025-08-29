@@ -82,13 +82,11 @@ class BeamTracker1(gutils.CustomApp):
         self.config_name = config_name
         self.config = {}
         self.qsettings = QtCore.QSettings("PyMoDAQ", "BeamTracker")
-        if platform.system() == "Windows":
-            self.configs_dir = self.qsettings.value('beam_tracker_configs/basepath', 
-                                   Path(os.environ.get("USERPROFILE", Path.home())) / "Documents")
+        stored = self.qsettings.value('beamtracker_configs/basepath', type=str)
+        if stored:
+            self.configs_dir = Path(str(stored))
         else:
-            self.configs_dir = self.qsettings.value('beam_tracker_configs/basepath', 
-                                   os.path.join(os.path.expanduser('~'), 'Documents'))
-        self.settings.param('config_base_path').setValue(self.configs_dir)
+            self.configs_dir = Path.home() / "Documents"
 
         self.setup_config()
         self.setup_ui()
@@ -118,7 +116,7 @@ class BeamTracker1(gutils.CustomApp):
         self.camera_viewer.detector = self.config['detector']
         self.camera_viewer.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_name'])
         self.camera_viewer.init_signal.connect(lambda _: self._on_viewer_initialized(camera_viewer=self.camera_viewer, target_viewer=self.target_viewer))
-        self.camera_viewer.init_hardware(do_init=self.config['do_init'])
+        self.camera_viewer.init_hardware_ui(do_init=self.config['do_init'])
 
     def setup_actions(self): 
         self.add_action('snap', 'Snap Data', 'Snapshot2_32', tip='Click to get one data shot') 
@@ -150,6 +148,10 @@ class BeamTracker1(gutils.CustomApp):
         if self.config['references']['use_references']:
             xml_path = f"{self.configs_dir}/{self.config['references']['reference']}.xml"
             self.load_roi_from_xml(target_viewer, xml_path)
+        param = self.settings.param('config_base_path')
+        param.blockSignals(True)
+        param.setValue(self.configs_dir)
+        param.blockSignals(False)        
 
     def setup_config(self):
         config_template_path = Path(__file__).parent.joinpath(f'{self.configs_dir}/{self.config_name}.toml')        
@@ -416,7 +418,9 @@ class BeamTracker1(gutils.CustomApp):
                 param.blockSignals(False)
 
         elif param.name() == 'config_base_path':
-            self.qsettings.setValue('focal_spot_configs/basepath', param.value())
+            self.qsettings.setValue('beamtracker_configs/basepath', param.value())
+            logger.info("Set the default config base path for the BeamTracker app to: ", self.qsettings.value('beamtracker_configs/basepath'))
+            self.qsettings.sync()
 
     def load_roi_from_xml(self, viewer, xml_path):
         tree = ET.parse(xml_path)
@@ -463,8 +467,19 @@ class BeamTracker1(gutils.CustomApp):
     def _on_viewer_initialized(self, camera_viewer, target_viewer):
         self.set_camera_presets(camera_viewer, target_viewer)
 
+    def cleanup_threads(self):
+        info = self.viewer
+        th = info.get('thread')
+        if th is not None:
+            try:
+                th.quit()
+                th.wait()
+            except Exception as e:
+                logger.error(f"Error stopping worker thread: {e}")
+
     def quit_app(self):
         try:
+            self.cleanup_threads()
             self.camera_viewer.quit_fun()
             self.camera_viewer.dockarea.parent().close()
         except Exception:
@@ -473,19 +488,19 @@ class BeamTracker1(gutils.CustomApp):
 
 
 def gaussian_lineout_x(x_axis, x0, y0, dx, dy, theta, y_cross, A=1.0):
-    cos_t = np.cos(theta * np.pi / 180)
-    sin_t = np.sin(theta * np.pi / 180)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
     X = x_axis - x0
     Y = y_cross - y0
-    exponent = ((X * cos_t + Y * sin_t)**2) / (dx**2) + ((-X * sin_t + Y * cos_t)**2) / (dy**2)
+    exponent = (2*(X * cos_t + Y * sin_t)**2) / (dx**2) + (2*(-X * sin_t + Y * cos_t)**2) / (dy**2)
     return A * np.exp(-exponent)
 
 def gaussian_lineout_y(y_axis, x0, y0, dx, dy, theta, x_cross, A=1.0):
-    cos_t = np.cos(theta * np.pi / 180)
-    sin_t = np.sin(theta * np.pi / 180)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
     X = x_cross - x0
     Y = y_axis - y0
-    exponent = ((X * cos_t + Y * sin_t)**2) / (dx**2) + ((-X * sin_t + Y * cos_t)**2) / (dy**2)
+    exponent = (2*(X * cos_t + Y * sin_t)**2) / (dx**2) + (2*(-X * sin_t + Y * cos_t)**2) / (dy**2)
     return A * np.exp(-exponent)
 
 
@@ -499,6 +514,9 @@ def main():
 
     default_config_name = 'config_template'
     prog = BeamTracker1(dockarea, default_config_name)
+    prog.mainwindow = mainwindow
+
+    app.aboutToQuit.connect(prog.cleanup_threads)    
 
     mainwindow.show()
     app.exec()

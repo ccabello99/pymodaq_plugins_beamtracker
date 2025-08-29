@@ -65,18 +65,31 @@ class BeamTracker2(gutils.CustomApp):
 
         self.pixel_calibration = 1.0
         self.units = 'um'
-
-        self.viewers = {}  # will store all per-viewer info
+        
+        dict_struct = {
+            'viewer': None,
+            'roi': None,
+            'lcd': None,
+            'show_ellipse': False,
+            'show_lineout': False,
+            'worker': None,
+            'thread': None,
+            'input': None,
+            'latest_frame': None,
+            'worker_busy': False,
+            '_saving_roi': False,
+            '_loading_roi': False,
+            'frame_id': 0,
+        }
+        self.viewers = [dict_struct, dict_struct]  # will store all per-viewer info
         self.config_name = config_name
         self.config = {}
         self.qsettings = QtCore.QSettings("PyMoDAQ", "BeamTracker")
-        if platform.system() == "Windows":
-            self.configs_dir = self.qsettings.value('beam_tracker_configs/basepath', 
-                                   Path(os.environ.get("USERPROFILE", Path.home())) / "Documents")
+        stored = self.qsettings.value('beamtracker_configs/basepath', type=str)
+        if stored:
+            self.configs_dir = Path(str(stored))
         else:
-            self.configs_dir = self.qsettings.value('beam_tracker_configs/basepath', 
-                                   os.path.join(os.path.expanduser('~'), 'Documents'))
-        self.settings.param('config_base_path').setValue(self.configs_dir)
+            self.configs_dir = Path.home() / "Documents"
 
         self.count = 0
 
@@ -118,7 +131,7 @@ class BeamTracker2(gutils.CustomApp):
         self.settings_tree2 = ParameterTree()
         self.settings2 = Parameter.create(name='Beam Tracker 2', type='group', children=self.params)
         self.settings_tree2.setParameters(self.settings2)
-        self.settings2.child('viewer_idx').setValue(1)
+        
         self.docks['settings_2'] = gutils.Dock('Settings')
         self.dockarea.addDock(self.docks['settings_2'], 'below', self.docks['lcds_2'])
         self.docks['settings_2'].addWidget(self.settings_tree2)
@@ -128,10 +141,10 @@ class BeamTracker2(gutils.CustomApp):
         cam_window.setCentralWidget(dockarea) 
         self.camera_viewer = DAQ_Viewer(dockarea, title='Beam Tracker 1', daq_type='DAQ2D') 
         self.camera_viewer.detector = self.config['camera_viewers']['first']['detector']
-        self.camera_viewer.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_viewers']['first']['camera_name'])
         self.camera_viewer.settings.child('main_settings', 'wait_time').setValue(200)
+        self.camera_viewer.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_viewers']['first']['camera_name'])
         self.camera_viewer.init_signal.connect(lambda _: self._on_viewer_initialized(viewer_idx=0, camera_viewer=self.camera_viewer, target_viewer=self.target_viewer))
-        self.camera_viewer.init_hardware(do_init=self.config['camera_viewers']['first']['do_init'])
+        self.camera_viewer.init_hardware_ui(do_init=self.config['camera_viewers']['first']['do_init'])
         QtWidgets.QApplication.processEvents()
 
         cam_window = QtWidgets.QMainWindow() 
@@ -139,10 +152,10 @@ class BeamTracker2(gutils.CustomApp):
         cam_window.setCentralWidget(dockarea) 
         self.camera_viewer2 = DAQ_Viewer(dockarea, title='Beam Tracker 2', daq_type='DAQ2D') 
         self.camera_viewer2.detector = self.config['camera_viewers']['second']['detector']
-        self.camera_viewer2.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_viewers']['second']['camera_name'])
         self.camera_viewer2.settings.child('main_settings', 'wait_time').setValue(200)
+        self.camera_viewer2.settings.child('detector_settings', 'camera_list').setValue(self.config['camera_viewers']['second']['camera_name'])
         self.camera_viewer2.init_signal.connect(lambda _: self._on_viewer_initialized(viewer_idx=1, camera_viewer=self.camera_viewer2, target_viewer=self.target_viewer2))
-        self.camera_viewer2.init_hardware(do_init=self.config['camera_viewers']['second']['do_init'])
+        self.camera_viewer2.init_hardware_ui(do_init=self.config['camera_viewers']['second']['do_init'])
         QtWidgets.QApplication.processEvents()
 
     def setup_actions(self): 
@@ -195,7 +208,15 @@ class BeamTracker2(gutils.CustomApp):
             else:
                 xml_path = f"{self.configs_dir}/{self.config['references']['reference_2']}.xml"
             self.load_roi_from_xml(target_viewer, xml_path)
-            
+        if viewer_idx == 0:
+            self.settings1.child('viewer_idx').setValue(0)
+            param = self.settings1.param('config_base_path')
+        else:
+            self.settings2.child('viewer_idx').setValue(1)
+            param = self.settings2.param('config_base_path')
+        param.blockSignals(True)
+        param.setValue(self.configs_dir)
+        param.blockSignals(False)
 
     def setup_config(self):
         config_template_path = f'{self.configs_dir}/{self.config_name}.toml'
@@ -203,7 +224,6 @@ class BeamTracker2(gutils.CustomApp):
             self.config = tomllib.load(f)
 
     def _setup_worker_threads(self):
-        self.viewers = []
         for idx in range(2):
             th = QtCore.QThread(self)
             w = BeamSizeWorker()
@@ -219,7 +239,7 @@ class BeamTracker2(gutils.CustomApp):
             w.result_ready.connect(lambda values, fid, _idx=idx: self._on_worker_result(values, fid, viewer_idx=_idx))
             w.error.connect(lambda err_msg, fid, _idx=idx: self._on_worker_error(err_msg, fid, viewer_idx=_idx))
 
-            self.viewers.append({
+            self.viewers[idx] = {
                 'camera_viewer': self.camera_viewer if idx == 0 else self.camera_viewer2,
                 'viewer': self.target_viewer if idx == 0 else self.target_viewer2,
                 'roi': None,
@@ -234,7 +254,7 @@ class BeamTracker2(gutils.CustomApp):
                 '_saving_roi': False,
                 '_loading_roi': False,
                 'frame_id': 0,
-            })
+            }
 
     def _on_new_frame(self, dte, viewer_idx):
         self.show_data(dte, viewer_idx=viewer_idx)
@@ -445,7 +465,7 @@ class BeamTracker2(gutils.CustomApp):
                 latest_roi.setSize(size)
                 latest_roi.setAngle(angle)
                 r, g, b = [random.randint(100, 255) for _ in range(3)]
-                latest_roi.setPen(QtGui.QPen(QtGui.QColor(r, g, b), 0.1))
+                latest_roi.setPen(QtGui.QPen(QtGui.QColor(r, g, b), 0.05))
             finally:
                 viewer_info['_saving_roi'] = False
                 param.blockSignals(True)
@@ -469,7 +489,10 @@ class BeamTracker2(gutils.CustomApp):
                 param.blockSignals(False)
 
         elif param.name() == 'config_base_path':
-            self.qsettings.setValue('focal_spot_configs/basepath', param.value())
+            self.qsettings.setValue('beamtracker_configs/basepath', param.value())
+            logger.info(f"Set the default config base path for the BeamTracker app to: {str(self.qsettings.value('beamtracker_configs/basepath'))}")
+            print(f"Set the default config base path for the BeamTracker app to: {str(self.qsettings.value('beamtracker_configs/basepath'))}")
+            self.qsettings.sync()
 
     def load_roi_from_xml(self, viewer, xml_path):
         tree = ET.parse(xml_path)
@@ -497,7 +520,7 @@ class BeamTracker2(gutils.CustomApp):
             roi.setAngle(angle)
             roi.setAcceptedMouseButtons(QtCore.Qt.NoButton)
             if color:
-                roi.setPen(color)
+                roi.setPen(QtGui.QPen(QtGui.QColor(color[1], color[2], color[3]), 0.05))
                 
                 
     def get_bounding_rect(self, a, b, theta, center=(0.0, 0.0)):
@@ -518,6 +541,17 @@ class BeamTracker2(gutils.CustomApp):
     def _on_viewer_initialized(self, viewer_idx, camera_viewer, target_viewer):
         self.set_camera_presets(viewer_idx, camera_viewer, target_viewer)
 
+    def cleanup_threads(self):
+        info = self.viewers
+        for viewer in info:
+            th = viewer.get('thread')
+            if th is not None:
+                try:
+                    th.quit()
+                    th.wait()
+                except Exception as e:
+                    logger.error(f"Error stopping worker thread: {e}")
+
     def quit_app(self):
         try:
             self.camera_viewer.quit_fun()
@@ -530,19 +564,19 @@ class BeamTracker2(gutils.CustomApp):
 
 
 def gaussian_lineout_x(x_axis, x0, y0, dx, dy, theta, y_cross, A=1.0):
-    cos_t = np.cos(theta * np.pi / 180)
-    sin_t = np.sin(theta * np.pi / 180)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
     X = x_axis - x0
     Y = y_cross - y0
-    exponent = ((X * cos_t + Y * sin_t)**2) / (dx**2) + ((-X * sin_t + Y * cos_t)**2) / (dy**2)
+    exponent = (2*(X * cos_t + Y * sin_t)**2) / (dx**2) + (2*(-X * sin_t + Y * cos_t)**2) / (dy**2)
     return A * np.exp(-exponent)
 
 def gaussian_lineout_y(y_axis, x0, y0, dx, dy, theta, x_cross, A=1.0):
-    cos_t = np.cos(theta * np.pi / 180)
-    sin_t = np.sin(theta * np.pi / 180)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
     X = x_cross - x0
     Y = y_axis - y0
-    exponent = ((X * cos_t + Y * sin_t)**2) / (dx**2) + ((-X * sin_t + Y * cos_t)**2) / (dy**2)
+    exponent = (2*(X * cos_t + Y * sin_t)**2) / (dx**2) + (2*(-X * sin_t + Y * cos_t)**2) / (dy**2)
     return A * np.exp(-exponent)
 
 
@@ -556,6 +590,9 @@ def main():
 
     default_config_name = 'config_template_2cams'
     prog = BeamTracker2(dockarea, default_config_name)
+    prog.mainwindow = mainwindow
+
+    app.aboutToQuit.connect(prog.cleanup_threads)    
 
     mainwindow.show()
     app.exec()
