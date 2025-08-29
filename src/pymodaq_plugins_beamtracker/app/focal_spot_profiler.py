@@ -157,7 +157,10 @@ class FocalSpotProfiler(gutils.CustomApp):
         if self.config['references']['use_references']:
             xml_path = f"{self.configs_dir}/{self.config['references']['reference']}.xml"
             self.load_roi_from_xml(target_viewer, xml_path)
-        self.settings.param('config_base_path').setValue(self.configs_dir)            
+        param = self.settings.param('config_base_path')
+        param.blockSignals(True)
+        param.setValue(self.configs_dir)
+        param.blockSignals(False) 
 
     def setup_config(self):
         config_template_path = Path(__file__).parent.joinpath(f'{self.configs_dir}/{self.config_name}.toml')        
